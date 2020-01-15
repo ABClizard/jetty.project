@@ -19,7 +19,11 @@
 package org.eclipse.jetty.server.handler;
 
 import java.io.IOException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
@@ -50,6 +54,7 @@ public class StatisticsHandler extends HandlerWrapper implements Graceful
 {
     private static final Logger LOG = Log.getLogger(StatisticsHandler.class);
     private final AtomicLong _statsStartedAt = new AtomicLong();
+    private volatile Shutdown _shutdown;
 
     private final CounterStatistic _requestStats = new CounterStatistic();
     private final SampleStatistic _requestTimeStats = new SampleStatistic();
@@ -66,15 +71,6 @@ public class StatisticsHandler extends HandlerWrapper implements Graceful
     private final LongAdder _responses4xx = new LongAdder();
     private final LongAdder _responses5xx = new LongAdder();
     private final LongAdder _responsesTotalBytes = new LongAdder();
-
-    private final Graceful.Shutdown _shutdown = new Graceful.Shutdown()
-    {
-        @Override
-        protected FutureCallback newShutdownCallback()
-        {
-            return new FutureCallback(_requestStats.getCurrent() == 0);
-        }
-    };
 
     private final AtomicBoolean _wrapWarning = new AtomicBoolean();
 
@@ -115,12 +111,14 @@ public class StatisticsHandler extends HandlerWrapper implements Graceful
             // If we have no more dispatches, should we signal shutdown?
             if (d == 0)
             {
-                FutureCallback shutdown = _shutdown.get();
+                Shutdown shutdown = _shutdown;
                 if (shutdown != null)
-                    shutdown.succeeded();
+                    shutdown.check();
             }
         }
     };
+
+
 
     /**
      * Resets the current request statistics.
@@ -204,12 +202,12 @@ public class StatisticsHandler extends HandlerWrapper implements Graceful
                 updateResponse(baseRequest);
 
                 // If we have no more dispatches, should we signal shutdown?
-                FutureCallback shutdown = _shutdown.get();
+                Shutdown shutdown = _shutdown;
                 if (shutdown != null)
                 {
                     response.flushBuffer();
                     if (d == 0)
-                        shutdown.succeeded();
+                        shutdown.check();
                 }
             }
             // else onCompletion will handle it.
@@ -251,7 +249,14 @@ public class StatisticsHandler extends HandlerWrapper implements Graceful
     @Override
     protected void doStart() throws Exception
     {
-        _shutdown.cancel();
+        _shutdown = new Shutdown()
+        {
+            @Override
+            public boolean isShutdownDone()
+            {
+                return _requestStats.getCurrent() == 0;
+            }
+        };
         super.doStart();
         statsReset();
     }
@@ -259,8 +264,8 @@ public class StatisticsHandler extends HandlerWrapper implements Graceful
     @Override
     protected void doStop() throws Exception
     {
-        _shutdown.cancel();
         super.doStop();
+        _shutdown = null;
     }
 
     /**
@@ -578,13 +583,17 @@ public class StatisticsHandler extends HandlerWrapper implements Graceful
     @Override
     public Future<Void> shutdown()
     {
-        return _shutdown.shutdown();
+        Shutdown shutdown = _shutdown;
+        if (shutdown == null)
+            return FutureCallback.SUCCEEDED;
+        return shutdown.shutdown();
     }
 
     @Override
     public boolean isShutdown()
     {
-        return _shutdown.isShutdown();
+        Shutdown shutdown = _shutdown;
+        return shutdown == null || shutdown.isShutdown();
     }
 
     @Override
@@ -592,4 +601,5 @@ public class StatisticsHandler extends HandlerWrapper implements Graceful
     {
         return String.format("%s@%x{%s,r=%d,d=%d}", getClass().getSimpleName(), hashCode(), getState(), _requestStats.getCurrent(), _dispatchedStats.getCurrent());
     }
+
 }

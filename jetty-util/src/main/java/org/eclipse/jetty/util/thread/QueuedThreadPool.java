@@ -133,7 +133,6 @@ public class QueuedThreadPool extends ContainerLifeCycle implements ThreadFactor
         setMinThreads(minThreads);
         setMaxThreads(maxThreads);
         setIdleTimeout(idleTimeout);
-        setStopTimeout(5000);
         setReservedThreads(reservedThreads);
         if (queue == null)
         {
@@ -196,16 +195,37 @@ public class QueuedThreadPool extends ContainerLifeCycle implements ThreadFactor
         // Signal the Runner threads that we are stopping
         int threads = _counts.getAndSetHi(Integer.MIN_VALUE);
 
+        // Fill the job queue with noop jobs to wakeup idle threads.
+        BlockingQueue<Runnable> jobs = getQueue();
+        for (int i = 0; i < threads; ++i)
+            jobs.offer(NOOP);
+
+        Thread.yield();
+        
+        // Close any un-executed jobs
+        while (!_jobs.isEmpty())
+        {
+            Runnable job = _jobs.poll();
+            if (job instanceof Closeable)
+            {
+                try
+                {
+                    ((Closeable)job).close();
+                }
+                catch (Throwable t)
+                {
+                    LOG.warn(t);
+                }
+            }
+            else if (job != NOOP)
+                LOG.warn("Stopped without executing or closing {}", job);
+        }
+
+
         // If stop timeout try to gracefully stop
         long timeout = getStopTimeout();
-        BlockingQueue<Runnable> jobs = getQueue();
         if (timeout > 0)
         {
-            // Fill the job queue with noop jobs to wakeup idle threads.
-            for (int i = 0; i < threads; ++i)
-            {
-                jobs.offer(NOOP);
-            }
 
             // try to let jobs complete naturally for half our stop time
             joinThreads(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeout) / 2);
@@ -243,25 +263,6 @@ public class QueuedThreadPool extends ContainerLifeCycle implements ThreadFactor
                     LOG.warn("{} Couldn't stop {}", this, unstopped);
                 }
             }
-        }
-
-        // Close any un-executed jobs
-        while (!_jobs.isEmpty())
-        {
-            Runnable job = _jobs.poll();
-            if (job instanceof Closeable)
-            {
-                try
-                {
-                    ((Closeable)job).close();
-                }
-                catch (Throwable t)
-                {
-                    LOG.warn(t);
-                }
-            }
-            else if (job != NOOP)
-                LOG.warn("Stopped without executing or closing {}", job);
         }
 
         if (_budget != null)

@@ -18,7 +18,11 @@
 
 package org.eclipse.jetty.util.component;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.jetty.util.Callback;
@@ -47,43 +51,34 @@ public interface Graceful
 
     boolean isShutdown();
 
-    /**
-     * A utility Graceful that uses a {@link FutureCallback} to indicate if shutdown is completed.
-     * By default the {@link FutureCallback} is returned as already completed, but the {@link #newShutdownCallback()} method
-     * can be overloaded to return a non-completed callback that will require a {@link Callback#succeeded()} or
-     * {@link Callback#failed(Throwable)} call to be completed.
-     */
-    class Shutdown implements Graceful
+    abstract class Shutdown implements Graceful
     {
-        private final AtomicReference<FutureCallback> _shutdown = new AtomicReference<>();
-
-        protected FutureCallback newShutdownCallback()
-        {
-            return FutureCallback.SUCCEEDED;
-        }
+        final AtomicReference<FutureCallback> _done = new AtomicReference<>();
 
         @Override
         public Future<Void> shutdown()
         {
-            return _shutdown.updateAndGet(fcb -> fcb == null ? newShutdownCallback() : fcb);
+            if (_done.get() == null)
+                _done.compareAndSet(null, new FutureCallback());
+            FutureCallback done = _done.get();
+            check();
+            return done;
         }
 
         @Override
         public boolean isShutdown()
         {
-            return _shutdown.get() != null;
+            FutureCallback done = _done.get();
+            return done != null && done.isDone();
         }
 
-        public void cancel()
+        public void check()
         {
-            FutureCallback shutdown = _shutdown.getAndSet(null);
-            if (shutdown != null && !shutdown.isDone())
-                shutdown.cancel(true);
+            FutureCallback done = _done.get();
+            if (done != null && isShutdownDone())
+                done.succeeded();
         }
 
-        public FutureCallback get()
-        {
-            return _shutdown.get();
-        }
+        public abstract boolean isShutdownDone();
     }
 }
